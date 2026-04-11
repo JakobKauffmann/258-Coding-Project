@@ -53,12 +53,14 @@ def write_server_logs(receiver_window_log, seq_received_log, goodput_log):
 
 def main():
     """Start the server, accept a connection, receive packets, and report goodput."""
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Use dual-stack IPv6 socket to accept both IPv4 and IPv6 connections
+    server_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind((HOST, PORT))
+    server_sock.bind(('::', PORT))
     server_sock.listen(1)
-    print(f"[server] Server IP: {socket.gethostbyname(socket.gethostname())}")
-    print(f"[server] Listening on {HOST}:{PORT}")
+    print(f"[server] Server IP: {socket.getfqdn()}")
+    print(f"[server] Listening on [::]:{PORT} (IPv4 + IPv6)")
 
     conn, addr = server_sock.accept()
     print(f"[server] Connection from Client IP: {addr[0]}, Port: {addr[1]}")

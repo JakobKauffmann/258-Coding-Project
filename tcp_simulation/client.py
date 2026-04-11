@@ -209,8 +209,11 @@ def print_retransmit_table(retransmit_counts):
 def main():
     """Connect to the server, perform handshake, and send packets."""
     global window_base
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((SERVER_IP, PORT))
+    # Resolve address to support both IPv4 and IPv6
+    addrinfo = socket.getaddrinfo(SERVER_IP, PORT, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    family, socktype, proto, canonname, sockaddr = addrinfo[0]
+    sock = socket.socket(family, socktype, proto)
+    sock.connect(sockaddr)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # disable Nagle
 
     client_ip = sock.getsockname()[0]
