@@ -1,6 +1,7 @@
 """
 TCP Sliding Window Client
 CS 258 - Computer Communication Networks
+Author: Zhuoqun Wei
 
 Simulates a TCP client that sends 10,000,000 packets using a sliding window
 protocol. Sequence numbers wrap at 2^16 (65536). The client probabilistically
@@ -16,6 +17,7 @@ import random
 import queue
 import sys
 import csv
+import signal
 from collections import Counter
 
 SERVER_IP = sys.argv[1] if len(sys.argv) > 1 else '127.0.0.1'
@@ -31,6 +33,7 @@ LOG_INTERVAL = 10000      # sample data for graphs every N packets
 lock = threading.Lock()
 window_base = 0           # lowest unACKed logical (unbounded) sequence number
 ack_queue = queue.Queue()
+shutdown_event = threading.Event()  # signals all threads to stop
 
 def unwrap_ack(wrapped_ack):
     """Convert a wrapped ACK (0..65535) back to a logical (unbounded) value
@@ -46,21 +49,24 @@ def unwrap_ack(wrapped_ack):
 
 def receiver_thread(sock):
     """Receive ACKs from the server and put them on ack_queue after unwrapping."""
-    while True:
+    while not shutdown_event.is_set():
         try:
             raw = b""
             while len(raw) < 4:
                 chunk = sock.recv(4 - len(raw))
                 if not chunk:
                     print("[receiver] Server closed connection.")
+                    shutdown_event.set()
                     ack_queue.put(None)
                     return
                 raw += chunk
             wrapped_ack = struct.unpack('!I', raw)[0]
             logical_ack = unwrap_ack(wrapped_ack)
             ack_queue.put(logical_ack)
-        except Exception as e:
-            print(f"[receiver] Error: {e}")
+        except OSError as e:
+            if not shutdown_event.is_set():
+                print(f"[receiver] Server connection lost: {e}")
+            shutdown_event.set()
             ack_queue.put(None)
             return
 
@@ -91,7 +97,11 @@ def sender_thread(sock):
                 dropped.discard(seq)
             # else: retransmit itself was dropped, stays in dropped set
         if batch:
-            sock.sendall(bytes(batch))
+            try:
+                sock.sendall(bytes(batch))
+            except OSError as e:
+                print(f"[sender] Failed to retransmit — server gone: {e}")
+                shutdown_event.set()
 
     def drain_acks():
         """Non-blocking drain of all available ACKs; returns True if receiver signaled done."""
@@ -108,13 +118,13 @@ def sender_thread(sock):
                 break
         return False
 
-    while next_seq < TOTAL_PACKETS or dropped:
+    while (next_seq < TOTAL_PACKETS or dropped) and not shutdown_event.is_set():
         with lock:
             base = window_base
 
         # Send new packets within the window — batched into one write
         batch = bytearray()
-        while next_seq < TOTAL_PACKETS and next_seq < base + WINDOW_SIZE:
+        while next_seq < TOTAL_PACKETS and next_seq < base + WINDOW_SIZE and not shutdown_event.is_set():
             if random.random() < DROP_PROB:
                 # Simulate packet drop
                 dropped.add(next_seq)
@@ -135,12 +145,21 @@ def sender_thread(sock):
             # Periodic retransmit every RETRANSMIT_INTERVAL new packets sent
             if next_seq % RETRANSMIT_INTERVAL == 0:
                 if batch:
-                    sock.sendall(bytes(batch))
+                    try:
+                        sock.sendall(bytes(batch))
+                    except OSError as e:
+                        print(f"[sender] Send failed — server gone: {e}")
+                        shutdown_event.set()
+                        break
                     batch = bytearray()
                 do_retransmit()
 
-        if batch:
-            sock.sendall(bytes(batch))
+        if batch and not shutdown_event.is_set():
+            try:
+                sock.sendall(bytes(batch))
+            except OSError as e:
+                print(f"[sender] Send failed — server gone: {e}")
+                shutdown_event.set()
 
         # Drain all available ACKs (non-blocking)
         if drain_acks():
@@ -209,6 +228,16 @@ def print_retransmit_table(retransmit_counts):
 def main():
     """Connect to the server, perform handshake, and send packets."""
     global window_base
+
+    # Register Ctrl+C / SIGTERM handler for graceful shutdown
+    def handle_signal(sig, frame):
+        print(f"\n[client] Signal received ({sig}) — shutting down gracefully...")
+        shutdown_event.set()
+        ack_queue.put(None)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
     # Resolve address to support both IPv4 and IPv6
     addrinfo = socket.getaddrinfo(SERVER_IP, PORT, socket.AF_UNSPEC, socket.SOCK_STREAM)
     family, socktype, proto, canonname, sockaddr = addrinfo[0]
@@ -235,18 +264,24 @@ def main():
     recv_t.start()
 
     total_sent, sender_window_log, dropped_log, retransmit_counts = sender_thread(sock)
-    print(f"[client] Sender done. Total packets sent (including retransmits): {total_sent}")
-    print(f"[client] Total unique packets intended: {TOTAL_PACKETS}")
 
-    # End-of-run control message (0xFFFFFFFF cannot collide with wrapped seq, max 65535)
-    sock.sendall(struct.pack('!I', 0xFFFFFFFF))
-    sock.sendall(struct.pack('!I', total_sent))
-    print("[client] Sent end-of-run signal.")
+    if shutdown_event.is_set():
+        print(f"[client] Stopped early at packet {total_sent} — saving partial logs...")
+    else:
+        print(f"[client] Sender done. Total packets sent (including retransmits): {total_sent}")
+        print(f"[client] Total unique packets intended: {TOTAL_PACKETS}")
+        # End-of-run control message (0xFFFFFFFF cannot collide with wrapped seq, max 65535)
+        try:
+            sock.sendall(struct.pack('!I', 0xFFFFFFFF))
+            sock.sendall(struct.pack('!I', total_sent))
+            print("[client] Sent end-of-run signal.")
+        except OSError:
+            print("[client] Could not send end-of-run signal — server already gone.")
 
     recv_t.join(timeout=5)
     sock.close()
 
-    # Write log files and print retransmission table
+    # Always write log files and print retransmission table, even on partial run
     write_client_logs(sender_window_log, dropped_log, retransmit_counts)
     print_retransmit_table(retransmit_counts)
     print("[client] Done.")
