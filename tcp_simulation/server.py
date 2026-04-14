@@ -166,12 +166,17 @@ def main():
     print(f"[server] Server IP: {socket.getfqdn()}")
     print(f"[server] Listening on [::]:{PORT} (IPv4 + IPv6)\n")
 
-    while True:
-        print(f"[server] Waiting for connection...")
-        conn, addr = server_sock.accept()
-        print(f"[server] Connection from {addr[0]}:{addr[1]}")
-        handle_client(conn, addr)
-        print(f"\n[server] Ready for next connection.\n")
+    try:
+        while True:
+            print(f"[server] Waiting for connection...")
+            conn, addr = server_sock.accept()
+            print(f"[server] Connection from {addr[0]}:{addr[1]}")
+            handle_client(conn, addr)
+            print(f"\n[server] Ready for next connection.\n")
+    except KeyboardInterrupt:
+        print("\n[server] Shutting down.")
+    finally:
+        server_sock.close()
 
 if __name__ == '__main__':
     main()
