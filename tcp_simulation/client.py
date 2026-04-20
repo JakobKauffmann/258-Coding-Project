@@ -239,10 +239,26 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     # Resolve address to support both IPv4 and IPv6
-    addrinfo = socket.getaddrinfo(SERVER_IP, PORT, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    try:
+        addrinfo = socket.getaddrinfo(SERVER_IP, PORT, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        print(f"[client] Cannot resolve '{SERVER_IP}': {e}")
+        sys.exit(1)
     family, socktype, proto, canonname, sockaddr = addrinfo[0]
     sock = socket.socket(family, socktype, proto)
-    sock.connect(sockaddr)
+    sock.settimeout(10)
+    try:
+        sock.connect(sockaddr)
+    except socket.timeout:
+        print(f"[client] Connection timed out — is the server running at {SERVER_IP}:{PORT}?")
+        print(f"[client] If on a different network, ensure port {PORT} is forwarded on the server's router.")
+        sock.close()
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print(f"[client] Connection refused — is the server running at {SERVER_IP}:{PORT}?")
+        sock.close()
+        sys.exit(1)
+    sock.settimeout(None)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # disable Nagle
 
     client_ip = sock.getsockname()[0]
@@ -278,7 +294,8 @@ def main():
         except OSError:
             print("[client] Could not send end-of-run signal — server already gone.")
 
-    recv_t.join(timeout=5)
+    recv_t.join(timeout=2)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
     sock.close()
 
     # Always write log files and print retransmission table, even on partial run

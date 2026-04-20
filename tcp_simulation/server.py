@@ -14,8 +14,25 @@ Usage: python server.py
 import socket
 import struct
 import csv
+import signal
+import sys
 
 PORT = 9999
+_server_sock = None
+
+def _shutdown(sig, frame):
+    print("\n[server] Shutting down.")
+    if _server_sock is not None:
+        try:
+            _server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                    struct.pack('ii', 1, 0))
+            _server_sock.close()
+        except OSError:
+            pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _shutdown)
+signal.signal(signal.SIGTERM, _shutdown)
 MAX_SEQ = 65536           # 2^16 — sequence numbers wrap at this value
 WINDOW_SIZE = 500         # must match client's window size for unwrapping
 GOODPUT_INTERVAL = 1000   # record goodput every N packets received
@@ -55,6 +72,7 @@ def handle_client(conn, addr):
     """Handle one client connection — receive packets, send ACKs, save logs.
     Returns when the client disconnects (cleanly or by crash)."""
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
     conn.settimeout(TIMEOUT)
 
     # Handshake — expect initial string, respond with "success"
@@ -156,27 +174,34 @@ def handle_client(conn, addr):
         write_server_logs(receiver_window_log, seq_received_log, goodput_log)
         conn.close()
 
+def get_local_ip():
+    """Return the local IP address used for outbound connections."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+
 def main():
     """Start the server and keep accepting new clients indefinitely."""
+    global _server_sock
     server_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind(('::', PORT))
     server_sock.listen(1)
-    print(f"[server] Server IP: {socket.getfqdn()}")
-    print(f"[server] Listening on [::]:{PORT} (IPv4 + IPv6)\n")
+    _server_sock = server_sock
+    local_ip = get_local_ip()
+    print(f"[server] Local IP: {local_ip}  (use this if client is on the same network)")
+    print(f"[server] Listening on port {PORT}\n")
 
-    try:
-        while True:
-            print(f"[server] Waiting for connection...")
-            conn, addr = server_sock.accept()
-            print(f"[server] Connection from {addr[0]}:{addr[1]}")
-            handle_client(conn, addr)
-            print(f"\n[server] Ready for next connection.\n")
-    except KeyboardInterrupt:
-        print("\n[server] Shutting down.")
-    finally:
-        server_sock.close()
+    while True:
+        print(f"[server] Waiting for connection...")
+        conn, addr = server_sock.accept()
+        print(f"[server] Connection from {addr[0]}:{addr[1]}")
+        handle_client(conn, addr)
+        print(f"\n[server] Ready for next connection.\n")
 
 if __name__ == '__main__':
     main()
